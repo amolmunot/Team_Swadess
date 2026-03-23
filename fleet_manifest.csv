@@ -1,0 +1,5 @@
+truck_id,driver_phone,cargo_type,min_safe_temp,max_safe_temp,status
+TRK-001,+918378994271,Insulin,2.0,8.0,EN_ROUTE
+TRK-002,+918378994271,mRNA_Vaccine,-25.0,-15.0,EN_ROUTE
+TRK-003,+918378994271,Paracetamol,15.0,25.0,EN_ROUTE
+TRK-004,+918378994271,Amoxicillin,20.0,25.0,MAINTENANCE
