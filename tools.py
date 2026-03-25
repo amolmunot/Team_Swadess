@@ -1,78 +1,134 @@
 import os
+import googlemaps
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from twilio.rest import Client
 
-# --- TOOL 1: Rerouting & Maps ---
-def find_nearest_cold_storage(time_to_spoil_mins: int) -> str:
-    """Scans for the nearest certified cold storage within the safe time window."""
-    print(f"\n🌍 [TOOL: Map] Scanning for facilities within a {time_to_spoil_mins} minute radius...")
+# --- TOOL 1: REAL GOOGLE MAPS REROUTING (WITH CLICKABLE LINK) ---
+def find_nearest_cold_storage(time_to_spoil_mins: int, lat: float, lng: float) -> str:
+    """Uses Google Maps to find the nearest cold storage within the safe time window."""
+    print(f"\n🌍 [TOOL: Map] Scanning Google Maps near ({lat}, {lng}) for facilities within {time_to_spoil_mins} mins...")
     
-    # For a reliable live demo, we use a mocked spatial database
-    facilities = [
-        {"name": "Apollo Cold Storage (Sector 4)", "eta_mins": 22},
-        {"name": "BlueDart Pharma Hub", "eta_mins": 55}
-    ]
+    gmaps_key = os.getenv('GMAPS_API_KEY')
+    if not gmaps_key:
+        return "FAILURE: Google Maps API key missing."
+        
+    gmaps = googlemaps.Client(key=gmaps_key)
+    truck_location = (lat, lng)
     
-    for facility in facilities:
-        if facility["eta_mins"] < time_to_spoil_mins:
-            print(f"   -> FOUND: {facility['name']} is {facility['eta_mins']} mins away.")
-            return f"SUCCESS: Reroute to {facility['name']}. ETA: {facility['eta_mins']} mins."
-            
-    return "FAILURE: No facilities within safe range. Total payload loss imminent."
+    try:
+        # 1. Search for nearby medical facilities
+        places_result = gmaps.places_nearby(
+            location=truck_location, 
+            radius=50000, 
+            keyword="hospital OR cold storage OR pharmaceutical warehouse"
+        )
+        
+        if not places_result.get('results'):
+            return "FAILURE: No facilities found in the region."
 
-# --- TOOL 2: TWILIO AI VOICE CALL ---
+        # 2. Extract top 3 closest places
+        candidates = places_result['results'][:3]
+        destinations = [place['geometry']['location'] for place in candidates]
+        
+        # 3. Get live traffic ETAs
+        matrix = gmaps.distance_matrix(
+            origins=[truck_location],
+            destinations=destinations,
+            mode="driving",
+            departure_time=datetime.now()
+        )
+        
+        # 4. Find the best match
+        for i, element in enumerate(matrix['rows'][0]['elements']):
+            if element['status'] == 'OK':
+                eta_mins = int(element['duration']['value'] / 60) 
+                facility_name = candidates[i]['name']
+                facility_address = candidates[i].get('vicinity', 'Address not found')
+                
+                # --- CORRECTED: OFFICIAL UNIVERSAL MAPS LINK ---
+                dest_lat = candidates[i]['geometry']['location']['lat']
+                dest_lng = candidates[i]['geometry']['location']['lng']
+                maps_url = f"https://www.google.com/maps/search/?api=1&query={dest_lat},{dest_lng}"
+                
+                if eta_mins <= time_to_spoil_mins:
+                    print(f"   -> FOUND: {facility_name} is {eta_mins} mins away (Safe!)")
+                    return f"SUCCESS: Reroute to {facility_name} at {facility_address}. Live ETA: {eta_mins} mins. Navigation Link: {maps_url}"
+                else:
+                    print(f"   -> REJECTED: {facility_name} is {eta_mins} mins away (Too far).")
+
+        return "FAILURE: Facilities found, but all are too far away. Payload loss imminent."
+        
+    except Exception as e:
+        return f"Google Maps API Error: {str(e)}"
+
+# --- TOOL 2: THE ULTIMATE HYBRID (WHATSAPP + TWILIO CALL) ---
 def send_sms_alert(phone_number: str, message: str) -> str:
-    """Makes an automated phone call to the driver using Twilio Voice."""
-    print(f"\n📞 [TOOL: Alert] Initiating AI Voice Call to {phone_number}...")
+    """Sends a WhatsApp message with routing details, then calls the phone via Twilio."""
+    print(f"\n📞 [TOOL: Alert] Dispatching WhatsApp Alert and Voice Call to {phone_number}...")
     
     try:
         account_sid = os.getenv('TWILIO_ACCOUNT_SID')
         auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-        from_number = os.getenv('TWILIO_PHONE_NUMBER')
         
+        # Verify this is your exact sandbox number from the Twilio Console
+        twilio_whatsapp_number = "whatsapp:+14155238886" 
+        formatted_driver_phone = f"whatsapp:{phone_number}"
+        standard_twilio_number = os.getenv('TWILIO_PHONE_NUMBER')
+
         if account_sid and auth_token:
             client = Client(account_sid, auth_token)
             
-            # This XML tells Twilio to create a voice and read the AI's instructions
+            # 1. SEND WHATSAPP MESSAGE
+            whatsapp_body = (
+                "🚨 *THERMACHAIN CRITICAL ALERT* 🚨\n\n"
+                "🧊 *Status:* Cooling Unit Failure Detected.\n"
+                "📍 *Action Required:* Immediate Reroute\n\n"
+                "*AI Routing Instructions:*\n"
+                f"{message}"
+            )
+            
+            client.messages.create(
+                body=whatsapp_body,
+                from_=twilio_whatsapp_number,
+                to=formatted_driver_phone
+            )
+            print("   -> 💬 WHATSAPP SUCCESS: Rich-text location sent to phone!")
+            
+            # 2. MAKE VOICE CALL
             twiml_script = f"""
             <Response>
                 <Say voice="Polly.Joanna" language="en-US">
                     Critical Alert from Therma Chain AI. 
                     Cooling unit failure detected on your vehicle. 
-                    Please listen carefully to your rerouting instructions.
-                    {message}.
-                    I repeat, please proceed to the safe harbor immediately. Goodbye.
+                    I have just sent a WhatsApp message to your phone with the exact location of the nearest safe cold storage. 
+                    Please check your screen and proceed immediately. Goodbye.
                 </Say>
             </Response>
             """
-            
-            # Trigger the phone call
-            call = client.calls.create(
+            client.calls.create(
                 twiml=twiml_script,
                 to=phone_number,
-                from_=from_number
+                from_=standard_twilio_number
             )
+            print("   -> 📞 VOICE SUCCESS: Phone is ringing right now!")
             
-            print("   -> TWILIO SUCCESS: Phone is ringing right now!")
-            return "Driver called and notified successfully."
+            return "Driver was sent a WhatsApp alert AND called successfully."
         else:
             return "Failed: Twilio credentials missing from .env file."
             
     except Exception as e:
-        return f"Failed to make call: {str(e)}"
+        return f"Failed to alert driver: {str(e)}"
 
 # --- TOOL 3: Regulatory Guardrail (PDF Generation) ---
 def generate_incident_report(truck_id: str, cargo: str, reached_temp: float, action_taken: str) -> str:
     """Generates a CDSCO/FDA compliant PDF incident report for auditors."""
     print(f"\n🏛️ [TOOL: Compliance] Generating immutable PDF Report for {truck_id}...")
     
-    # Create a unique filename based on the current time
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"Incident_Report_{truck_id}_{timestamp}.pdf"
     
-    # Draw the PDF Document
     c = canvas.Canvas(filename, pagesize=letter)
     c.setFont("Helvetica-Bold", 16)
     c.drawString(50, 750, "MANDATORY COMPLIANCE INCIDENT REPORT (CDSCO/FDA)")
@@ -82,7 +138,6 @@ def generate_incident_report(truck_id: str, cargo: str, reached_temp: float, act
     c.drawString(50, 690, f"Vehicle Identification: {truck_id}")
     c.drawString(50, 670, f"Payload Cargo: {cargo}")
     
-    # Draw a red line separator
     c.setStrokeColorRGB(1, 0, 0)
     c.line(50, 650, 550, 650) 
     
@@ -92,10 +147,9 @@ def generate_incident_report(truck_id: str, cargo: str, reached_temp: float, act
     
     c.drawString(50, 540, "AUTONOMOUS AI ACTION TAKEN:")
     
-    # Text wrapping for the action taken
     textobject = c.beginText(50, 520)
     textobject.setFont("Helvetica", 11)
-    textobject.textLines(action_taken)
+    textobject.textLines(str(action_taken))
     c.drawText(textobject)
     
     c.save()

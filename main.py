@@ -1,12 +1,19 @@
+import pyttsx3
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pandas as pd
 from datetime import datetime
 
-# ---> THIS IS THE CRUCIAL CONNECTION TO YOUR AI <---
 from agents import kickoff_recovery_process
 
 app = FastAPI(title="ThermaChain AI Webhook")
+
+# Initialize the voice engine for the loud presentation alarm
+try:
+    voice_engine = pyttsx3.init()
+except Exception as e:
+    print(f"Warning: Voice engine failed to initialize: {e}")
+    voice_engine = None
 
 # Load the digital manifest (our database)
 try:
@@ -15,7 +22,12 @@ except FileNotFoundError:
     print("Error: fleet_manifest.csv not found!")
     manifest_df = pd.DataFrame()
 
-# Define the expected JSON payload from the truck
+# --- NEW: ALERT MEMORY LOCK ---
+# This dictionary remembers which trucks are currently in an active failure state.
+# It prevents the AI from being triggered 100 times for the same broken truck.
+active_alerts = {}
+
+# Define the expected JSON payload from the edge-device
 class TelemetryPayload(BaseModel):
     truck_id: str
     timestamp: str
@@ -37,16 +49,44 @@ async def receive_telemetry(data: TelemetryPayload):
     
     print(f"[{data.timestamp}] Ping from {data.truck_id} | Temp: {data.internal_temp_C}°C | Compressor: {data.compressor_status}")
 
-    # 2. The "Dumb Filter" Logic
+    # 2. The "Smart Filter" Logic
     if data.compressor_status == "FAILED" or data.internal_temp_C > max_safe_temp:
-        print(f"🚨 CRITICAL ALERT: {data.truck_id} carrying {cargo} is failing!")
+        
+        # ---> CHECK THE MEMORY LOCK <---
+        if data.truck_id in active_alerts:
+            # We already triggered the AI for this truck. Ignore the duplicate ping.
+            return {"status": "alert_active", "message": "Duplicate alert suppressed"}
+        
+        # If it's not locked, this is a NEW failure! Lock it down.
+        active_alerts[data.truck_id] = True
+        
+        print(f"\n🚨 CRITICAL ALERT: {data.truck_id} carrying {cargo} is failing!")
         print(f"   Current Temp: {data.internal_temp_C}°C (Max Allowed: {max_safe_temp}°C)")
+        
+        # ---> THE LOUD ALARM <---
+        if voice_engine:
+            voice_engine.say(f"Critical Alert! Compressor failure detected in {data.truck_id}. Initiating AI emergency protocol.")
+            voice_engine.runAndWait()
         
         # ---> WAKE UP THE AI AGENTS <---
         driver_phone = truck_data.iloc[0]['driver_phone']
-        kickoff_recovery_process(data.truck_id, driver_phone, cargo, data.internal_temp_C, max_safe_temp)
+        
+        kickoff_recovery_process(
+            data.truck_id, 
+            driver_phone, 
+            cargo, 
+            data.internal_temp_C, 
+            max_safe_temp,
+            data.gps_lat,   
+            data.gps_long   
+        )
         
         return {"status": "alert_triggered", "message": "AI Agents Dispatched"}
     
-    # If everything is fine, do nothing and save API costs
-    return {"status": "nominal", "message": "Data logged successfully"}
+    else:
+        # ---> RESET THE LOCK IF THE TRUCK IS FIXED <---
+        if data.truck_id in active_alerts:
+            print(f"\n✅ SYSTEM NOMINAL: {data.truck_id} has recovered. Resetting alert memory.")
+            del active_alerts[data.truck_id]
+            
+        return {"status": "nominal", "message": "Data logged successfully"}
