@@ -1,11 +1,12 @@
 import os
+import json
 import googlemaps
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from twilio.rest import Client
 
-# --- TOOL 1: REAL GOOGLE MAPS REROUTING (WITH CLICKABLE LINK) ---
+# --- TOOL 1: REAL GOOGLE MAPS REROUTING (WITH CLICKABLE LINK & 3D MAP PIN) ---
 def find_nearest_cold_storage(time_to_spoil_mins: int, lat: float, lng: float) -> str:
     """Uses Google Maps to find the nearest cold storage within the safe time window."""
     print(f"\n🌍 [TOOL: Map] Scanning Google Maps near ({lat}, {lng}) for facilities within {time_to_spoil_mins} mins...")
@@ -47,13 +48,22 @@ def find_nearest_cold_storage(time_to_spoil_mins: int, lat: float, lng: float) -
                 facility_name = candidates[i]['name']
                 facility_address = candidates[i].get('vicinity', 'Address not found')
                 
-                # --- CORRECTED: OFFICIAL UNIVERSAL MAPS LINK ---
+                # OFFICIAL UNIVERSAL MAPS LINK
                 dest_lat = candidates[i]['geometry']['location']['lat']
                 dest_lng = candidates[i]['geometry']['location']['lng']
                 maps_url = f"https://www.google.com/maps/search/?api=1&query={dest_lat},{dest_lng}"
                 
                 if eta_mins <= time_to_spoil_mins:
                     print(f"   -> FOUND: {facility_name} is {eta_mins} mins away (Safe!)")
+                    
+                    # ---> NEW: DROP THE PIN FOR THE 3D DASHBOARD <---
+                    try:
+                        with open("target_location.json", "w") as f:
+                            json.dump({"lat": dest_lat, "lng": dest_lng, "name": facility_name}, f)
+                    except Exception as e:
+                        print(f"   -> Warning: Could not save map pin data: {e}")
+                    # ---------------------------------------------
+                    
                     return f"SUCCESS: Reroute to {facility_name} at {facility_address}. Live ETA: {eta_mins} mins. Navigation Link: {maps_url}"
                 else:
                     print(f"   -> REJECTED: {facility_name} is {eta_mins} mins away (Too far).")

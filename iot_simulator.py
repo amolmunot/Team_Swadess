@@ -1,39 +1,79 @@
-import requests
 import time
+import random
+import requests
+import pandas as pd
 from datetime import datetime
+import os
 
-# The URL of your local FastAPI server
 WEBHOOK_URL = "http://localhost:8000/telemetry"
+CSV_FILE = "fleet_manifest.csv"
 
-# Initial healthy truck state
-payload = {
-    "truck_id": "TRK-002", # This truck carries mRNA vaccines (Max temp -15.0C)
-    "timestamp": "",
-    "gps_lat": 28.7041,
-    "gps_long": 77.1025,
-    "internal_temp_C": -20.0,
-    "compressor_status": "ONLINE"
-}
-
-print("Starting Edge IoT Simulator...")
-print("Simulating healthy transit for 10 seconds, then triggering a failure.")
-
-for i in range(10):
-    payload["timestamp"] = datetime.utcnow().isoformat()
-    
-    # After 3 pings (approx 9 seconds), simulate a mechanical failure
-    if i == 3:
-        print("\n💥 SIMULATING COMPRESSOR FAILURE 💥\n")
-        payload["compressor_status"] = "FAILED"
-    
-    # If the compressor is failed, the temperature starts rising rapidly
-    if payload["compressor_status"] == "FAILED":
-        payload["internal_temp_C"] += 2.5  # Temp goes up by 2.5 degrees every 3 seconds
-
+def run_simulator():
+    print("🚛 Starting ThermaChain Enterprise Edge Simulator...")
     try:
-        response = requests.post(WEBHOOK_URL, json=payload)
-        print(f"Sent: {payload['internal_temp_C']}°C | Server Response: {response.json()['status']}")
-    except requests.exceptions.ConnectionError:
-        print("Error: Could not connect to the FastAPI server. Is it running?")
-    
-    time.sleep(3) # Wait 3 seconds before the next ping
+        df = pd.read_csv(CSV_FILE)
+    except FileNotFoundError:
+        print(f"❌ Error: '{CSV_FILE}' not found!")
+        return
+
+    while True: # INFINITE LOOP FOR CONTINUOUS DEMO
+        # 1. Clear old map targets
+        if os.path.exists("target_location.json"):
+            os.remove("target_location.json")
+
+        # 2. Pick a random truck & random weather
+        target_truck = df.sample(1).iloc[0]
+        truck_id = target_truck['truck_id']
+        max_safe_temp = float(target_truck['max_safe_temp'])
+        cargo = target_truck['cargo_type']
+        
+        ext_temp = random.uniform(35.0, 45.0) # Summer weather in India
+        decay_rate = random.uniform(0.3, 1.2) # Degrees lost per minute
+
+        print(f"\n==================================================")
+        print(f"🎯 NEW ROUTE INITIALIZED: {truck_id} carrying {cargo}")
+        print(f"🌦️ Outside Temp: {round(ext_temp,1)}°C | Decay Rate: {round(decay_rate,2)}°C/min")
+        
+        current_temp = max_safe_temp - random.uniform(2.0, 5.0) 
+        compressor_status = "OK"
+        
+        # Base Coordinates (Rourkela)
+        lat = 22.2604
+        lng = 84.8536
+
+        # Drive for 5 pings, fail on the 6th
+        for iteration in range(1, 10):
+            lat += random.uniform(-0.001, 0.001)
+            lng += random.uniform(-0.001, 0.001)
+
+            if iteration == 4:
+                print(f"💥 {truck_id} COMPRESSOR FAILURE DETECTED!")
+                compressor_status = "FAILED"
+                
+            if compressor_status == "FAILED":
+                current_temp = max_safe_temp + random.uniform(0.5, 2.0)
+
+            payload = {
+                "truck_id": truck_id,
+                "timestamp": datetime.now().isoformat(),
+                "gps_lat": round(lat, 6),
+                "gps_long": round(lng, 6),
+                "internal_temp_C": round(current_temp, 2),
+                "external_temp_C": round(ext_temp, 1),
+                "decay_rate": round(decay_rate, 2),
+                "compressor_status": compressor_status
+            }
+
+            try:
+                requests.post(WEBHOOK_URL, json=payload)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 📡 Ping | Temp: {round(current_temp, 2)}°C | Status: {compressor_status}")
+            except Exception:
+                pass
+
+            time.sleep(4) # Wait between GPS pings
+            
+        print(f"✅ Route complete/rescued. Resetting for next truck...")
+        time.sleep(5) # Pause before starting the next truck
+
+if __name__ == "__main__":
+    run_simulator()
