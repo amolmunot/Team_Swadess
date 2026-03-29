@@ -1,79 +1,49 @@
-import pyttsx3
-import json
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
-import pandas as pd
-from datetime import datetime
-
 from agents import kickoff_recovery_process
+import json
 
-app = FastAPI(title="ThermaChain AI Webhook")
+app = FastAPI(title="ThermaChain API")
 
-try:
-    voice_engine = pyttsx3.init()
-except:
-    voice_engine = None
-
-try:
-    manifest_df = pd.read_csv("fleet_manifest.csv")
-except:
-    manifest_df = pd.DataFrame()
-
-handled_emergencies = set()
-
-# NEW: Accepting weather and decay rate
-class TelemetryPayload(BaseModel):
+class Telemetry(BaseModel):
     truck_id: str
     timestamp: str
     gps_lat: float
     gps_long: float
     internal_temp_C: float
-    external_temp_C: float  
-    decay_rate: float       
+    external_temp_C: float
+    decay_rate: float
     compressor_status: str
 
+# Memory Lock to prevent API spam
+active_emergencies = set()
+
 @app.post("/telemetry")
-async def receive_telemetry(data: TelemetryPayload):
+async def receive_telemetry(data: Telemetry, background_tasks: BackgroundTasks):
     
-    # Save live status for Streamlit
-    with open("live_status.json", "w") as f:
-        json.dump(data.model_dump(), f)
+    # Save the latest ping for the 3D Dashboard to read
+    try:
+        with open("live_status.json", "w") as f:
+            json.dump(data.dict(), f)
+    except Exception:
+        pass
 
-    # AUTO-RESET: If the truck is fixed/new, clear the memory lock
-    if data.compressor_status == "OK":
-        if data.truck_id in handled_emergencies:
-            handled_emergencies.remove(data.truck_id)
-        return {"status": "nominal"}
-
-    if data.truck_id in handled_emergencies:
-        return {"status": "ignored"}
-
-    truck_data = manifest_df[manifest_df['truck_id'] == data.truck_id]
-    if truck_data.empty: return {"status": "error"}
-    
-    max_safe_temp = float(truck_data.iloc[0]['max_safe_temp'])
-    cargo = truck_data.iloc[0]['cargo_type']
-
-    if data.compressor_status == "FAILED" or data.internal_temp_C > max_safe_temp:
-        handled_emergencies.add(data.truck_id)
-        print(f"\n🚨 CRITICAL ALERT: {data.truck_id} carrying {cargo} failing!")
+    # Trigger the AI Swarm ONLY if a failure occurs and it hasn't been triggered yet
+    if data.compressor_status == "FAILED" and data.truck_id not in active_emergencies:
+        print(f"\n🚨 CRITICAL ALERT: {data.truck_id} failing! Locking state and waking AI Swarm...\n")
+        active_emergencies.add(data.truck_id)
         
-        if voice_engine:
-            voice_engine.say(f"Alert! Failure in {data.truck_id}.")
-            voice_engine.runAndWait()
+        # Determine cargo (simulated for the prompt)
+        cargo_type = "Insulin" if "001" in data.truck_id else "Paracetamol"
         
-        # PASSING WEATHER DATA TO THE AI
-        kickoff_recovery_process(
+        background_tasks.add_task(
+            kickoff_recovery_process,
             data.truck_id, 
-            truck_data.iloc[0]['driver_phone'], 
-            cargo, 
+            data.gps_lat, 
+            data.gps_long, 
             data.internal_temp_C, 
-            max_safe_temp,
-            data.gps_lat,   
-            data.gps_long,
-            data.external_temp_C, 
-            data.decay_rate       
+            data.decay_rate, 
+            cargo_type
         )
-        return {"status": "alert_triggered"}
-    
-    return {"status": "nominal"}
+
+    return {"status": "received"}
